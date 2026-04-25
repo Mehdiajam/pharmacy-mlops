@@ -1,0 +1,119 @@
+services:
+
+  # ─────────────────────────────────────
+  # MLflow Tracking Server
+  # ─────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    container_name: mlflow
+    restart: always
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlflow_data:/mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+    networks:
+      - mlops_network
+
+  # ─────────────────────────────────────
+  # Trainer API Service
+  # ─────────────────────────────────────
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    container_name: trainer
+    entrypoint: ""
+    command: ["python", "trainer_api.py"]
+    restart: always
+    ports:
+      - "8001:8001"
+    environment:
+      - DB_URL=postgresql://postgres:@host.docker.internal:5432/parapharmacie_BD
+      - MLFLOW_URI=http://mlflow:5000
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ./models:/app/models
+      - ./train.py:/app/train.py
+      - ./trainer_api.py:/app/trainer_api.py
+    depends_on:
+      - mlflow
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - mlops_network
+
+  # ─────────────────────────────────────
+  # FastAPI Prediction API
+  # ─────────────────────────────────────
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: fastapi
+    restart: always
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mlflow
+      - trainer
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - TRAINER_API_URL=http://trainer:8001
+      - MODEL_DIR=/app/models
+    volumes:
+      - ./models:/app/models
+    networks:
+      - mlops_network
+
+  # ─────────────────────────────────────
+  # Streamlit Web App
+  # ─────────────────────────────────────
+  streamlit:
+    image: python:3.11-slim
+    container_name: streamlit_app
+    restart: always
+    ports:
+      - "8501:8501"
+    depends_on:
+      - fastapi
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: >
+      bash -c "pip install streamlit requests pandas --quiet &&
+               streamlit run app.py
+               --server.port=8501
+               --server.address=0.0.0.0
+               --server.headless=true"
+    networks:
+      - mlops_network
+
+  # ─────────────────────────────────────
+  # n8n Workflow Automation
+  # ─────────────────────────────────────
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n_school_project
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BLOCK_NODES=
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - NODES_EXCLUDE=none
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+      - C:/Users/ASUS/mlproject:/home/node/ml_project
+    networks:
+      - mlops_network
+
+networks:
+  mlops_network:
+    driver: bridge

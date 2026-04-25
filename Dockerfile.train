@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y gcc g++ && apt-get clean
+
+COPY requirements.txt .
+RUN pip install --prefer-binary -r requirements.txt
+
+COPY train.py .
+COPY trainer_api.py .
+
+ENTRYPOINT ["python"]
+CMD ["trainer_api.py"]
