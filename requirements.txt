@@ -18,3 +18,5 @@ streamlit
 requests
 pydantic
 aiohttp
+prometheus-client
+python-json-logger

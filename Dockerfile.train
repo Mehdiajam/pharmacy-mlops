@@ -9,6 +9,8 @@ RUN pip install --prefer-binary -r requirements.txt
 
 COPY train.py .
 COPY trainer_api.py .
+COPY monitoring.py .
+COPY logging_config.py .
 
 ENTRYPOINT ["python"]
 CMD ["trainer_api.py"]

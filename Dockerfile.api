@@ -9,6 +9,8 @@ RUN pip install --prefer-binary -r requirements.txt
 RUN pip install fastapi uvicorn[standard]
 
 COPY api.py .
+COPY monitoring.py .
+COPY logging_config.py .
 
 EXPOSE 8000
 

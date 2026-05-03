@@ -1,5 +1,6 @@
-# trainer_api.py - Complete API with sync and async modes
+# trainer_api.py - Complete API with sync and async modes and Prometheus monitoring
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
 import subprocess
@@ -7,6 +8,32 @@ import os
 import json
 import threading
 from datetime import datetime
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+
+# ─────────────────────────────────────────
+# PROMETHEUS METRICS
+# ─────────────────────────────────────────
+training_duration_seconds = Histogram(
+    'training_duration_seconds',
+    'Training duration in seconds',
+    buckets=(30, 60, 120, 300, 600)
+)
+
+training_attempts = Counter(
+    'training_attempts_total',
+    'Total training attempts',
+    ['trigger_source', 'status']
+)
+
+active_training_jobs = Gauge(
+    'active_training_jobs',
+    'Number of active training jobs'
+)
+
+model_versions_created = Counter(
+    'model_versions_created_total',
+    'Total model versions created'
+)
 
 app = FastAPI(title="Trainer Service API", port=8001)
 
@@ -25,8 +52,11 @@ class TrainResponse(BaseModel):
 def run_training_background(trigger_source: str):
     """Run training in background thread"""
     lock_file = "/tmp/training.lock"
+    start_time = datetime.now()
+    active_training_jobs.inc()
+    
     try:
-        print(f"[{datetime.now()}] Background training started (trigger: {trigger_source})")
+        print(f"[{start_time}] Background training started (trigger: {trigger_source})")
         
         result = subprocess.run(
             ["python", "/app/train.py"],
@@ -35,12 +65,17 @@ def run_training_background(trigger_source: str):
             timeout=600  # 10 minutes timeout
         )
         
+        duration = (datetime.now() - start_time).total_seconds()
+        training_duration_seconds.observe(duration)
+        
         # Remove lock file
         if os.path.exists(lock_file):
             os.remove(lock_file)
         
         if result.returncode == 0:
             print(f"[{datetime.now()}] Training completed successfully")
+            training_attempts.labels(trigger_source=trigger_source, status="success").inc()
+            model_versions_created.inc()
             # Get model version
             try:
                 import mlflow
@@ -54,15 +89,20 @@ def run_training_background(trigger_source: str):
                 pass
         else:
             print(f"[{datetime.now()}] Training failed: {result.stderr[:200]}")
+            training_attempts.labels(trigger_source=trigger_source, status="failed").inc()
             
     except subprocess.TimeoutExpired:
         if os.path.exists(lock_file):
             os.remove(lock_file)
         print(f"[{datetime.now()}] Training timeout after 10 minutes")
+        training_attempts.labels(trigger_source=trigger_source, status="timeout").inc()
     except Exception as e:
         if os.path.exists(lock_file):
             os.remove(lock_file)
         print(f"[{datetime.now()}] Training error: {e}")
+        training_attempts.labels(trigger_source=trigger_source, status="error").inc()
+    finally:
+        active_training_jobs.dec()
 
 @app.post("/train", response_model=TrainResponse)
 async def trigger_training(request: TrainRequest):
@@ -102,6 +142,9 @@ async def trigger_training(request: TrainRequest):
     try:
         print(f"[{datetime.now()}] Sync training triggered by: {request.trigger_source}")
         
+        start_time = datetime.now()
+        active_training_jobs.inc()
+        
         result = subprocess.run(
             ["python", "/app/train.py"],
             capture_output=True,
@@ -109,10 +152,16 @@ async def trigger_training(request: TrainRequest):
             timeout=600  # 10 minutes timeout
         )
         
+        duration = (datetime.now() - start_time).total_seconds()
+        training_duration_seconds.observe(duration)
+        active_training_jobs.dec()
+        
         # Remove lock file
         os.remove(lock_file)
         
         if result.returncode == 0:
+            training_attempts.labels(trigger_source=request.trigger_source, status="success").inc()
+            model_versions_created.inc()
             # Get the latest model version from MLflow
             model_version = "unknown"
             try:
@@ -134,6 +183,7 @@ async def trigger_training(request: TrainRequest):
                 error=None
             )
         else:
+            training_attempts.labels(trigger_source=request.trigger_source, status="failed").inc()
             return TrainResponse(
                 status="failed",
                 message="Training failed",
@@ -143,8 +193,10 @@ async def trigger_training(request: TrainRequest):
             )
             
     except subprocess.TimeoutExpired:
+        active_training_jobs.dec()
         if os.path.exists(lock_file):
             os.remove(lock_file)
+        training_attempts.labels(trigger_source=request.trigger_source, status="timeout").inc()
         return TrainResponse(
             status="failed",
             message="Training timeout after 10 minutes",
@@ -153,8 +205,10 @@ async def trigger_training(request: TrainRequest):
             error="Process took too long"
         )
     except Exception as e:
+        active_training_jobs.dec()
         if os.path.exists(lock_file):
             os.remove(lock_file)
+        training_attempts.labels(trigger_source=request.trigger_source, status="error").inc()
         return TrainResponse(
             status="error",
             message="Unexpected error",
@@ -166,6 +220,11 @@ async def trigger_training(request: TrainRequest):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "trainer"}
+
+@app.get("/metrics")
+def metrics():
+    """Expose Prometheus metrics"""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 if __name__ == "__main__":
     import uvicorn

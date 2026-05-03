@@ -1,5 +1,5 @@
 # ============================================================
-# api.py — FastAPI Prediction Endpoint
+# api.py — FastAPI Prediction Endpoint with Prometheus Monitoring
 # ============================================================
 
 import os
@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from typing import Optional
 import mlflow
@@ -15,6 +16,13 @@ import mlflow.sklearn
 from mlflow.tracking import MlflowClient
 import requests
 import asyncio
+import time
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+import logging
+
+# Import monitoring & logging
+from monitoring import get_monitoring_aggregator
+from logging_config import log_prediction_event, log_api_error, log_anomaly
 
 # ─────────────────────────────────────────
 # CONFIG
@@ -25,6 +33,49 @@ TRAINER_URL = os.getenv("TRAINER_API_URL", "http://trainer:8001")
 MODEL_NAME  = "stock-classifier"
 
 mlflow.set_tracking_uri(MLFLOW_URI)
+
+# ─────────────────────────────────────────
+# PROMETHEUS METRICS
+# ─────────────────────────────────────────
+prediction_requests_total = Counter(
+    'prediction_requests_total',
+    'Total number of prediction requests',
+    ['status', 'model_type']
+)
+
+prediction_latency_seconds = Histogram(
+    'prediction_latency_seconds',
+    'Prediction latency in seconds',
+    buckets=(0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0)
+)
+
+prediction_confidence = Histogram(
+    'prediction_confidence',
+    'Prediction confidence distribution',
+    buckets=(0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0)
+)
+
+model_accuracy_gauge = Gauge(
+    'model_accuracy_percent',
+    'Current model accuracy percentage'
+)
+
+model_confidence_mean = Gauge(
+    'model_confidence_mean',
+    'Mean prediction confidence'
+)
+
+api_errors_total = Counter(
+    'api_errors_total',
+    'Total API errors',
+    ['endpoint', 'error_type']
+)
+
+training_requests_total = Counter(
+    'training_requests_total',
+    'Total training requests',
+    ['status']
+)
 
 app = FastAPI(
     title="Stock Classification API",
@@ -103,6 +154,11 @@ class HealthResponse(BaseModel):
 def root():
     return {"message": "Stock Classification API is running", "docs": "/docs"}
 
+@app.get("/metrics", summary="Prometheus metrics")
+def metrics():
+    """Expose Prometheus metrics"""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
 @app.get("/health", response_model=HealthResponse, summary="Health check")
 def health():
     return HealthResponse(
@@ -113,7 +169,7 @@ def health():
 
 @app.post("/train", response_model=TrainResponse, summary="Trigger model training")
 async def trigger_training(request: TrainRequest):
-    """Forward training request to the trainer service"""
+    """Forward training request to the trainer service with monitoring"""
 
     def make_request():
         response = requests.post(
@@ -121,26 +177,39 @@ async def trigger_training(request: TrainRequest):
             json={
                 "trigger_source": request.trigger_source,
                 "force_retrain":  request.force_retrain,
-                "async_mode":     request.async_mode   # ← pass async_mode!
+                "async_mode":     request.async_mode
             },
-            timeout=30  # Short timeout — trainer handles the long work
+            timeout=30
         )
         response.raise_for_status()
         return response.json()
 
     try:
         result = await asyncio.to_thread(make_request)
+        training_requests_total.labels(status=result.get("status", "unknown")).inc()
         return TrainResponse(**result)
     except requests.exceptions.Timeout:
+        training_requests_total.labels(status="timeout").inc()
+        api_errors_total.labels(endpoint="/train", error_type="timeout").inc()
         raise HTTPException(status_code=504, detail="Trainer service timed out")
     except requests.exceptions.ConnectionError:
+        training_requests_total.labels(status="connection_error").inc()
+        api_errors_total.labels(endpoint="/train", error_type="connection_error").inc()
         raise HTTPException(status_code=503, detail="Cannot reach trainer service")
     except Exception as e:
+        training_requests_total.labels(status="error").inc()
+        api_errors_total.labels(endpoint="/train", error_type="unknown").inc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict", response_model=PredictResponse, summary="Predict stock level")
 def predict(request: PredictRequest):
+    """Predict stock level with monitoring"""
+    start_time = time.time()
+    monitoring = get_monitoring_aggregator()
+    
     if model is None:
+        api_errors_total.labels(endpoint="/predict", error_type="model_not_loaded").inc()
+        prediction_requests_total.labels(status="error", model_type="none").inc()
         raise HTTPException(status_code=503, detail="Model not loaded. Run the training pipeline first.")
 
     margin_ht    = request.Margin_HT    if request.Margin_HT    is not None else request.Prix_de_vente_HT - request.Prix_d_achat_HT
@@ -179,6 +248,30 @@ def predict(request: PredictRequest):
         confidence    = max(prob_high, prob_low)
         label         = "Low Stock" if prediction == 1 else "High Stock"
 
+        # Record metrics
+        latency = time.time() - start_time
+        prediction_latency_seconds.observe(latency)
+        prediction_confidence.observe(confidence)
+        prediction_requests_total.labels(status="success", model_type="random_forest").inc()
+        
+        # Track in monitoring aggregator
+        monitoring.record_prediction(latency=latency, confidence=confidence, error=False)
+        
+        # Log prediction event
+        log_prediction_event({
+            "confidence": confidence,
+            "latency_ms": latency * 1000,
+            "prediction": label,
+        })
+        
+        # Update gauges
+        health_report = monitoring.generate_health_report()
+        if health_report.get("status") != "no_data":
+            try:
+                model_confidence_mean.set(float(health_report["metrics"]["confidence_mean"]))
+            except:
+                pass
+
         return PredictResponse(
             prediction=prediction,
             label=label,
@@ -187,6 +280,11 @@ def predict(request: PredictRequest):
             probability_high=round(prob_high, 4)
         )
     except Exception as e:
+        latency = time.time() - start_time
+        api_errors_total.labels(endpoint="/predict", error_type="prediction_error").inc()
+        prediction_requests_total.labels(status="error", model_type="random_forest").inc()
+        monitoring.record_prediction(latency=latency, confidence=0.0, error=True)
+        log_api_error("/predict", str(e), 500)
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
 @app.get("/model/info", summary="Model information")
@@ -199,3 +297,10 @@ def model_info():
         "features":   features,
         "model_path": f"{MODEL_DIR}/rf_model.pkl"
     }
+
+@app.get("/health/detailed", summary="Detailed health report with monitoring")
+def detailed_health():
+    """Get detailed health report including monitoring metrics"""
+    monitoring = get_monitoring_aggregator()
+    report = monitoring.generate_health_report()
+    return report

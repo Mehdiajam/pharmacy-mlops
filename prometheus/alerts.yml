@@ -1,0 +1,158 @@
+# Prometheus Alerting Rules for MLOps System
+# Alert conditions for production monitoring
+
+groups:
+  - name: mlops_alerts
+    interval: 15s
+    rules:
+      # ─────────────────────────────────────────
+      # API PERFORMANCE ALERTS
+      # ─────────────────────────────────────────
+      
+      - alert: HighLatencyP95
+        expr: histogram_quantile(0.95, prediction_latency_seconds) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: fastapi
+        annotations:
+          summary: "High latency detected (P95)"
+          description: "P95 latency is {{ $value | humanizeDuration }} (threshold: 2s)"
+      
+      - alert: HighLatencyP99
+        expr: histogram_quantile(0.99, prediction_latency_seconds) > 5
+        for: 3m
+        labels:
+          severity: critical
+          service: fastapi
+        annotations:
+          summary: "Critical latency detected (P99)"
+          description: "P99 latency is {{ $value | humanizeDuration }} (threshold: 5s)"
+      
+      # ─────────────────────────────────────────
+      # ERROR RATE ALERTS
+      # ─────────────────────────────────────────
+      
+      - alert: HighErrorRate
+        expr: |
+          (
+            increase(api_errors_total[5m]) /
+            increase(prediction_requests_total[5m]) > 0.05
+          )
+        for: 5m
+        labels:
+          severity: warning
+          service: fastapi
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is above 5%"
+      
+      - alert: ModelNotLoaded
+        expr: api_errors_total{error_type="model_not_loaded"} > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: fastapi
+        annotations:
+          summary: "Model is not loaded"
+          description: "Prediction model failed to load. Check training pipeline."
+      
+      # ─────────────────────────────────────────
+      # MODEL HEALTH ALERTS
+      # ─────────────────────────────────────────
+      
+      - alert: LowConfidencePredictions
+        expr: model_confidence_mean < 0.6
+        for: 10m
+        labels:
+          severity: warning
+          service: model
+        annotations:
+          summary: "Model confidence dropping"
+          description: "Mean prediction confidence is {{ $value | humanizePercentage }} (baseline: 0.75)"
+      
+      - alert: PredictionConfidenceVariability
+        expr: |
+          (
+            histogram_quantile(0.95, prediction_confidence) -
+            histogram_quantile(0.05, prediction_confidence)
+          ) > 0.4
+        for: 15m
+        labels:
+          severity: warning
+          service: model
+        annotations:
+          summary: "High variance in prediction confidence"
+          description: "Confidence spread is wider than expected (>0.4)"
+      
+      # ─────────────────────────────────────────
+      # TRAINING ALERTS
+      # ─────────────────────────────────────────
+      
+      - alert: TrainingFailures
+        expr: increase(training_requests_total{status="error"}[1h]) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: trainer
+        annotations:
+          summary: "Multiple training failures detected"
+          description: "{{ $value }} training failures in the last hour"
+      
+      - alert: TrainingTimeout
+        expr: increase(training_requests_total{status="timeout"}[1h]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: trainer
+        annotations:
+          summary: "Training timeout detected"
+          description: "Training process exceeded maximum time limit"
+      
+      # ─────────────────────────────────────────
+      # REQUEST VOLUME ALERTS
+      # ─────────────────────────────────────────
+      
+      - alert: ZeroRequests
+        expr: rate(prediction_requests_total[5m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+          service: fastapi
+        annotations:
+          summary: "No prediction requests in last 30 minutes"
+          description: "API appears to be idle. Check if service is accessible."
+      
+      - alert: HighRequestRate
+        expr: rate(prediction_requests_total[1m]) > 100
+        for: 3m
+        labels:
+          severity: info
+          service: fastapi
+        annotations:
+          summary: "High request rate detected"
+          description: "Request rate: {{ $value | humanize }} requests/sec"
+      
+      # ─────────────────────────────────────────
+      # SERVICE AVAILABILITY ALERTS
+      # ─────────────────────────────────────────
+      
+      - alert: APIDown
+        expr: up{job="fastapi"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: fastapi
+        annotations:
+          summary: "API service is down"
+          description: "FastAPI service is not responding to health checks"
+      
+      - alert: TrainerDown
+        expr: up{job="trainer"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: trainer
+        annotations:
+          summary: "Trainer service is down"
+          description: "Trainer API service is not responding to health checks"
