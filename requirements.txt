@@ -12,6 +12,7 @@ sqlalchemy
 psycopg2-binary
 scipy
 mlflow==2.13.0
+pyarrow==14.0.2
 joblib
 fastapi
 uvicorn[standard]
