@@ -8,6 +8,12 @@ import json
 import pandas as pd
 import streamlit.components.v1 as components
 
+try:
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+
 # ─────────────────────────────────────────
 # CONFIG & ICONS
 # ─────────────────────────────────────────
@@ -29,25 +35,30 @@ def get_icon(name, size=24, color="currentColor"):
 
 # Map users to their specific dashboard links
 USER_DASHBOARDS = {
-    "admin": {
-        "password": "admin123",
-        "name": "Head Office Admin",
-        "url": "https://app.powerbi.com/reportEmbed?reportId=408f00aa-8560-4180-9906-175f960ea7ac&autoAuth=true&ctid=604f1a96-cbe8-43f8-abbf-f8eaf5d85730"
-    },
     "manager": {
         "password": "manager123",
-        "name": "Store Manager",
-        "url": "REPLACE_WITH_YOUR_SECOND_LINK"
+        "name": "Head Office Admin",
+        "url": "https://app.powerbi.com/reportEmbed?reportId=d94d6e3c-0c8e-405d-b457-1debc53c5539&autoAuth=true&ctid=604f1a96-cbe8-43f8-abbf-f8eaf5d85730"
     },
-    "pharmacist": {
-        "password": "pharmacy123",
-        "name": "Lead Pharmacist",
-        "url": "REPLACE_WITH_YOUR_THIRD_LINK"
+    "mehdi": {
+        "password": "mehdi123",
+        "name": "Stock Manager",
+        "url": "https://app.powerbi.com/reportEmbed?reportId=408f00aa-8560-4180-9906-175f960ea7ac&autoAuth=true&ctid=604f1a96-cbe8-43f8-abbf-f8eaf5d85730&pageName=Stock+Manager"
+    },
+    "hechmi": {
+        "password": "hechmi123",
+        "name": "Financial Manager",
+        "url": "https://app.powerbi.com/reportEmbed?reportId=d94d6e3c-0c8e-405d-b457-1debc53c5539&autoAuth=true&ctid=604f1a96-cbe8-43f8-abbf-f8eaf5d85730&pageName=financial+Overview"
+    },
+    "hedi": {
+        "password": "hedi123",
+        "name": "Marketing Manager",
+        "url": "https://app.powerbi.com/reportEmbed?reportId=65ca80b5-adaf-448f-a122-b4efdb259eae&autoAuth=true&ctid=604f1a96-cbe8-43f8-abbf-f8eaf5d85730"
     }
 }
 
 st.set_page_config(
-    page_title="PharmaStock AI",
+    page_title="Paratech",
     page_icon="🌿",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -155,14 +166,14 @@ def show_login():
             <div style='display: inline-block; padding: 20px; background: white; border-radius: 50%; box-shadow: var(--shadow); color: var(--primary);'>
                 {get_icon("pharmacy", size=48)}
             </div>
-            <h1 style='color: var(--primary); margin-top: 15px; margin-bottom: 0;'>PharmaStock AI</h1>
-            <p style='color: var(--text); opacity: 0.8; margin-top: 5px; font-weight: 500;'>Inventory Intelligence Portal</p>
+            <h1 style='color: var(--primary); margin-top: 15px; margin-bottom: 0;'>Paratech</h1>
+            <p style='color: var(--text); opacity: 0.8; margin-top: 5px; font-weight: 500;'>Where smart health meets better solutions</p>
         </div>
         """, unsafe_allow_html=True)
         
         with st.form("login_form"):
             st.markdown("<h4 style='text-align: center; margin-bottom: 20px;'>Secure Member Access</h4>", unsafe_allow_html=True)
-            user = st.text_input("Username", placeholder="admin, manager, or pharmacist").lower().strip()
+            user = st.text_input("Username", placeholder="Stock Manager, Manager, Marketing Manager or Financial Manager").lower().strip()
             pwd = st.text_input("Password", type="password", placeholder="••••••••")
             st.markdown("<br>", unsafe_allow_html=True)
             submit = st.form_submit_button("Sign In", use_container_width=True)
@@ -203,16 +214,28 @@ else:
         
         # Navigation
         st.markdown("<p style='font-weight: 600; font-size: 0.75rem; color: var(--text); opacity: 0.5; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em;'>Main Menu</p>", unsafe_allow_html=True)
-        
-        if st.button("Stock Prediction", use_container_width=True, 
+        if st.session_state.username == "manager" or  st.session_state.username == "mehdi":
+            if st.button("Stock Prediction", use_container_width=True, 
                      type="primary" if st.session_state.page == 'prediction' else "secondary"):
-            st.session_state.page = 'prediction'
-            st.rerun()
+                st.session_state.page = 'prediction'
+                st.rerun()
             
         if st.button("Business Analytics", use_container_width=True, 
                      type="primary" if st.session_state.page == 'dashboard' else "secondary"):
             st.session_state.page = 'dashboard'
             st.rerun()
+        if st.session_state.username == "manager" or  st.session_state.username == "hechmi" or st.session_state.username == "hedi":
+            if st.button("Profit Analysis", use_container_width=True, 
+                     type="primary" if st.session_state.page == 'profitability' else "secondary"):
+                st.session_state.page = 'profitability'
+                st.rerun()
+        
+        # Manager-only forecasting page
+        if st.session_state.username == "manager":
+            if st.button("Time Forecasting", use_container_width=True, 
+                        type="primary" if st.session_state.page == 'forecasting' else "secondary"):
+                st.session_state.page = 'forecasting'
+                st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Sign Out", use_container_width=True):
@@ -262,6 +285,247 @@ else:
             """, unsafe_allow_html=True)
         else:
             components.iframe(src=url, height=800, scrolling=True)
+
+    # --- PAGE: TIME FORECASTING (Admin Only) ---
+    elif st.session_state.page == 'forecasting':
+        st.markdown(f"<h1>{get_icon('trending', size=32)} Time Series Forecasting</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='font-size: 1.1rem; opacity: 0.8; margin-bottom: 30px;'>Advanced stock quantity forecasting using Prophet and SARIMA models.</p>", unsafe_allow_html=True)
+        
+        try:
+            # Get time series history
+            history_response = requests.get(f"{API_URL}/forecast/history", timeout=5)
+            history_data = history_response.json()
+            
+            # Get forecast data
+            col1, col2 = st.columns(2)
+            with col1:
+                model_type = st.radio("Select Forecasting Model", ["Prophet", "SARIMA"], horizontal=True)
+            with col2:
+                st.markdown("<p style='margin-top: 8px;'><b>Model:</b> Currently showing forecast data</p>", unsafe_allow_html=True)
+            
+            st.markdown("<hr>", unsafe_allow_html=True)
+            
+            forecast_model = model_type.lower()
+            forecast_response = requests.get(f"{API_URL}/forecast?model_type={forecast_model}", timeout=5)
+            forecast_data = forecast_response.json()
+            
+            # Display metrics
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.metric("Model", forecast_data["model"], delta=None)
+            with m2:
+                st.metric("RMSE", f"{forecast_data['rmse']:.2f} units")
+            with m3:
+                st.metric("MAE", f"{forecast_data['mae']:.2f} units")
+            with m4:
+                st.metric("Test Points", len(forecast_data['forecast_values']))
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # Visualization
+            st.markdown(f"<h3>📊 {model_type} Forecast vs Actual</h3>", unsafe_allow_html=True)
+            
+            # Create plotly figure for interactive visualization
+            try:
+                import plotly.graph_objects as go
+                
+                fig = go.Figure()
+                
+                # Add training data
+                if 'train' in history_data:
+                    fig.add_trace(go.Scatter(
+                        x=history_data['train']['dates'],
+                        y=history_data['train']['values'],
+                        mode='lines',
+                        name='Training Data',
+                        line=dict(color='steelblue', width=2)
+                    ))
+                
+                # Add actual test data
+                fig.add_trace(go.Scatter(
+                    x=forecast_data['actual_dates'],
+                    y=forecast_data['actual_values'],
+                    mode='lines+markers',
+                    name='Actual Test Data',
+                    line=dict(color='black', width=2),
+                    marker=dict(size=8)
+                ))
+                
+                # Add forecast
+                fig.add_trace(go.Scatter(
+                    x=forecast_data['forecast_dates'],
+                    y=forecast_data['forecast_values'],
+                    mode='lines+markers',
+                    name=f'{model_type} Forecast',
+                    line=dict(color='tomato' if model_type == 'SARIMA' else 'darkorange', width=2, dash='dash'),
+                    marker=dict(size=8)
+                ))
+                
+                fig.update_layout(
+                    title=f"{model_type} Stock Quantity Forecast",
+                    xaxis_title="Date",
+                    yaxis_title="Stock Quantity (Units)",
+                    hovermode='x unified',
+                    height=500,
+                    template='plotly_white',
+                    showlegend=True
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            except ImportError:
+                st.info("Plotly not available. Displaying data table instead.")
+                
+                # Fallback: Display as table
+                forecast_df = pd.DataFrame({
+                    'Date': forecast_data['forecast_dates'],
+                    'Actual': forecast_data['actual_values'],
+                    'Forecast': forecast_data['forecast_values'],
+                    'Error': [abs(a - f) for a, f in zip(forecast_data['actual_values'], forecast_data['forecast_values'])]
+                })
+                st.dataframe(forecast_df, use_container_width=True)
+            
+            # Detailed comparison
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown(f"<h3>📈 Detailed Forecast Analysis</h3>", unsafe_allow_html=True)
+            
+            forecast_df = pd.DataFrame({
+                'Date': forecast_data['forecast_dates'],
+                'Actual Qty': forecast_data['actual_values'],
+                f'{model_type} Forecast': forecast_data['forecast_values'],
+                'Absolute Error': [abs(a - f) for a, f in zip(forecast_data['actual_values'], forecast_data['forecast_values'])],
+                'Error %': [abs(a - f) / (a + 1e-9) * 100 for a, f in zip(forecast_data['actual_values'], forecast_data['forecast_values'])]
+            })
+            
+            st.dataframe(forecast_df, use_container_width=True)
+            
+            # Summary statistics
+            st.markdown("<br>", unsafe_allow_html=True)
+            col1, col2, col3 = st.columns(3)
+            
+            errors = forecast_df['Absolute Error'].values
+            error_pcts = forecast_df['Error %'].values
+            
+            with col1:
+                st.metric("Mean Absolute Error", f"{errors.mean():.2f} units")
+            with col2:
+                st.metric("Max Error", f"{errors.max():.2f} units")
+            with col3:
+                st.metric("Mean Error %", f"{error_pcts.mean():.1f}%")
+            
+            # Interpretation
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("""
+            <div style='background: #F0FDF4; padding: 20px; border-radius: 12px; border-left: 4px solid #15803D;'>
+                <h4 style='margin-top: 0; color: #15803D !important;'>📌 Forecast Interpretation</h4>
+                <ul style='margin-bottom: 0;'>
+                    <li><b>Lower RMSE/MAE:</b> More accurate forecasts. Better for inventory planning.</li>
+                    <li><b>SARIMA:</b> Ideal for stationary time series with clear seasonal patterns.</li>
+                    <li><b>Prophet:</b> Robust to missing data and handles non-linear trends well.</li>
+                    <li><b>Use MAPE:</b> Percentage errors help evaluate forecast quality for different magnitude values.</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        except Exception as e:
+            st.error(f"Forecasting API Error: {str(e)}")
+            st.info("Ensure the training pipeline has completed and forecasting models are available.")
+
+    # --- PAGE: PROFITABILITY ---
+    elif st.session_state.page == 'profitability':
+        st.markdown(f"<h1>{get_icon('price', size=32)} Profitability & ROI Analysis</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='font-size: 1.1rem; opacity: 0.8; margin-bottom: 30px;'>Simulate sales performance and project potential revenue using AI-driven volume estimation.</p>", unsafe_allow_html=True)
+
+        with st.container():
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("### 💰 Pricing Inputs")
+                prix_achat = st.number_input("Unit Purchase Price HT (DT)", value=25.5, step=0.1, key="prof_achat")
+                prix_vente = st.number_input("Unit Selling Price HT (DT)", value=35.0, step=0.1, key="prof_vente")
+                prix_ttc   = st.number_input("Unit Selling Price TTC (DT)", value=41.3, step=0.1, key="prof_ttc")
+            with col2:
+                st.markdown("### 🏷️ Product Segment")
+                famille = st.selectbox("Product Family", ["TOILETTE", "COMPRIME", "COMP. ALIM.", "OPH-ORL", "POMMADE", "SUPPOSITOIRE", "DIVERS", "NATURE"], key="prof_famille")
+                designation = st.text_input("Designation", value="SHAMPOO", key="prof_desig")
+                ville = st.text_input("City Location", value="Tunis", key="prof_ville")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Calculate Profit Potential", type="primary", use_container_width=True):
+            with st.spinner("Analyzing Market Potential..."):
+                try:
+                    payload = {
+                        "Prix_d_achat_HT": prix_achat, 
+                        "Prix_de_vente_HT": prix_vente, 
+                        "Prix_de_vente_TTC": prix_ttc, 
+                        "Famille": famille, 
+                        "Designation": designation, 
+                        "Libelle": designation, 
+                        "Ville": ville, 
+                        "Stock_Duration_Days": 30.0
+                    }
+                    response = requests.post(f"{API_URL}/predict/profitability", json=payload, timeout=5)
+                    
+                    if response.status_code != 200:
+                        error_detail = response.json().get('detail', 'Unknown API Error')
+                        st.error(f"Prediction Error: {error_detail}")
+                        if "not loaded" in error_detail.lower():
+                            st.info("💡 **Tip:** You need to run the training pipeline first to generate the profitability model.")
+                    else:
+                        res = response.json()
+                        st.markdown("<br><hr>", unsafe_allow_html=True)
+                        
+                        # Key Metrics
+                        m1, m2, m3, m4 = st.columns(4)
+                        with m1:
+                            st.metric("Expected Volume", f"{res['predicted_volume']} units")
+                        with m2:
+                            st.metric("Margin/Unit", f"{res['margin_per_unit']} DT")
+                        with m3:
+                            st.metric("Estimated Profit", f"{res['predicted_profit']} DT")
+                        with m4:
+                            st.metric("ROI", f"{res['roi_percent']}%")
+
+                        # Visual Report
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        
+                        # Performance Tiering
+                        roi = res['roi_percent']
+                        profit = res['predicted_profit']
+                        
+                        if roi > 40 and profit > 100:
+                            tier_label = "🌟 STRATEGIC ASSET"
+                            tier_color = "#15803D"
+                            tier_bg = "#F0FDF4"
+                            tier_desc = "High margin and high volume. This product is a primary profit driver."
+                        elif roi > 30:
+                            tier_label = "✅ STABLE PERFORMER"
+                            tier_color = "#0369A1"
+                            tier_bg = "#F0F9FF"
+                            tier_desc = "Healthy margins with steady demand. Essential for operational sustainability."
+                        elif profit > 50:
+                            tier_label = "📦 VOLUME DRIVER"
+                            tier_color = "#B45309"
+                            tier_bg = "#FFFBEB"
+                            tier_desc = "Lower margins but high turnover. Good for cash flow management."
+                        else:
+                            tier_label = "⚠️ LOW PRIORITY"
+                            tier_color = "#6B7280"
+                            tier_bg = "#F9FAFB"
+                            tier_desc = "Limited profit potential. Consider optimizing pricing or procurement."
+
+                        st.markdown(f"""
+                        <div style='background: {tier_bg}; padding: 30px; border-radius: 20px; border-left: 8px solid {tier_color};'>
+                            <h2 style='margin-top: 0; color: {tier_color} !important;'>{tier_label}</h2>
+                            <p style='font-size: 1.2rem; color: #374151;'>{tier_desc}</p>
+                            <hr style='border-color: {tier_color}; opacity: 0.2;'>
+                            <div style='display: flex; justify-content: space-between; align-items: center;'>
+                                <span style='font-weight: 600; color: {tier_color};'>AI CONFIDENCE: HIGH</span>
+                                <span style='font-style: italic; color: #6B7280;'>Based on historical data for {famille} in {ville}</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                except Exception as e:
+                    st.error(f"Profitability Engine Error: {str(e)}")
 
     # --- PAGE: PREDICTION ---
     else:

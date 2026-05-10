@@ -14,17 +14,19 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from urllib.parse import quote, unquote, urlparse, urlunparse, parse_qsl
 
 from sqlalchemy import create_engine
 
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                              f1_score, roc_auc_score, confusion_matrix,
-                             ConfusionMatrixDisplay, RocCurveDisplay)
+                             ConfusionMatrixDisplay, RocCurveDisplay,
+                             mean_squared_error, mean_absolute_error, r2_score)
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
 
@@ -37,7 +39,50 @@ import joblib
 # ─────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────
-DB_URL       = os.getenv("DB_URL", "postgresql://postgres:@host.docker.internal:5432/parapharmacie_BD")
+def normalize_db_url(db_url):
+    if isinstance(db_url, bytes):
+        for encoding in ("utf-8", "cp1252", "latin1"):
+            try:
+                db_url = db_url.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError("Could not decode DB_URL bytes using utf-8, cp1252, or latin1")
+
+    # Now db_url is str
+    try:
+        db_url.encode('utf-8')
+    except UnicodeEncodeError:
+        # Contains non-UTF-8 chars, assume latin1 encoding
+        db_url = db_url.encode('latin1').decode('utf-8')
+
+    parsed = urlparse(db_url)
+    if parsed.scheme in ("postgresql", "postgres"):
+        username = quote(unquote(parsed.username)) if parsed.username else None
+        password = quote(unquote(parsed.password)) if parsed.password else None
+        netloc = ""
+        if username:
+            netloc += username
+        if password is not None:
+            netloc += f":{password}"
+        if netloc:
+            netloc += "@"
+        if parsed.hostname:
+            netloc += parsed.hostname
+            if parsed.port:
+                netloc += f":{parsed.port}"
+
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if "client_encoding" not in query:
+            query["client_encoding"] = "utf8"
+        query_str = "&".join(f"{quote(str(k))}={quote(str(v))}" for k, v in query.items())
+
+        db_url = urlunparse((parsed.scheme, netloc, parsed.path or "", parsed.params, query_str, parsed.fragment))
+
+    return db_url
+
+DB_URL       = normalize_db_url(os.getenv("DB_URL", "postgresql://postgres:@host.docker.internal:5432/parapharmacie_BD"))
 MLFLOW_URI   = os.getenv("MLFLOW_TRACKING_URI", "http://host.docker.internal:5000")
 EXPERIMENT   = "stock-classification"
 MODEL_NAME   = "stock-classifier"
@@ -72,7 +117,7 @@ if not connect_to_mlflow(MLFLOW_URI, EXPERIMENT):
 # ─────────────────────────────────────────
 def load_data(db_url: str) -> pd.DataFrame:
     print("[1/6] Loading data from PostgreSQL...")
-    engine = create_engine(db_url)
+    engine = create_engine(normalize_db_url(db_url), connect_args={"options": "-c client_encoding=UTF8"})
     fact     = pd.read_sql('SELECT * FROM "FactInventory"', engine)
     product  = pd.read_sql('SELECT * FROM "Dim_Produit"', engine)
     date     = pd.read_sql('SELECT * FROM "DimDate"', engine)
@@ -205,14 +250,12 @@ def train_logistic_regression(X_train, X_test, y_train, y_test, cv):
         mlflow.log_metrics(metrics)
 
         # Confusion matrix artifact
-        fig, ax = plt.subplots(figsize=(5, 4))
-        ConfusionMatrixDisplay(confusion_matrix(y_test, y_pred),
-                               display_labels=['High Stock', 'Low Stock']).plot(ax=ax, colorbar=False)
-        ax.set_title("LR — Confusion Matrix")
-        plt.tight_layout()
-        plt.savefig("/tmp/lr_cm.png", dpi=120)
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        cm_path = os.path.join(temp_dir, "lr_cm.png")
+        plt.savefig(cm_path, dpi=120)
         plt.close()
-        mlflow.log_artifact("/tmp/lr_cm.png", artifact_path="plots")
+        mlflow.log_artifact(cm_path, artifact_path="plots")
 
         # Log model
         signature = infer_signature(X_test, y_pred)
@@ -267,14 +310,18 @@ def train_random_forest(X_train, X_test, y_train, y_test, cv, X_all, features):
         mlflow.log_param("n_features", len(features))
 
         # Confusion matrix
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        
         fig, ax = plt.subplots(figsize=(5, 4))
         ConfusionMatrixDisplay(confusion_matrix(y_test, y_pred),
                                display_labels=['High Stock', 'Low Stock']).plot(ax=ax, colorbar=False)
         ax.set_title("RF — Confusion Matrix")
         plt.tight_layout()
-        plt.savefig("/tmp/rf_cm.png", dpi=120)
+        cm_path = os.path.join(temp_dir, "rf_cm.png")
+        plt.savefig(cm_path, dpi=120)
         plt.close()
-        mlflow.log_artifact("/tmp/rf_cm.png", artifact_path="plots")
+        mlflow.log_artifact(cm_path, artifact_path="plots")
 
         # ROC curve
         fig, ax = plt.subplots(figsize=(5, 4))
@@ -282,9 +329,10 @@ def train_random_forest(X_train, X_test, y_train, y_test, cv, X_all, features):
         ax.plot([0,1],[0,1],'k--', linewidth=0.8)
         ax.set_title("RF — ROC Curve")
         plt.tight_layout()
-        plt.savefig("/tmp/rf_roc.png", dpi=120)
+        roc_path = os.path.join(temp_dir, "rf_roc.png")
+        plt.savefig(roc_path, dpi=120)
         plt.close()
-        mlflow.log_artifact("/tmp/rf_roc.png", artifact_path="plots")
+        mlflow.log_artifact(roc_path, artifact_path="plots")
 
         # Feature importance
         importances = grid.best_estimator_.named_steps['clf'].feature_importances_
@@ -293,9 +341,10 @@ def train_random_forest(X_train, X_test, y_train, y_test, cv, X_all, features):
         feat_imp.plot(kind='barh', ax=ax, color='steelblue')
         ax.set_title("RF — Feature Importance")
         plt.tight_layout()
-        plt.savefig("/tmp/rf_importance.png", dpi=120)
+        imp_path = os.path.join(temp_dir, "rf_importance.png")
+        plt.savefig(imp_path, dpi=120)
         plt.close()
-        mlflow.log_artifact("/tmp/rf_importance.png", artifact_path="plots")
+        mlflow.log_artifact(imp_path, artifact_path="plots")
 
         # Log model to registry
         signature = infer_signature(X_test, y_pred)
@@ -310,9 +359,12 @@ def train_random_forest(X_train, X_test, y_train, y_test, cv, X_all, features):
         joblib.dump(features, f"{MODEL_DIR}/features.pkl")
 
         # Save feature list as artifact
-        with open("/tmp/features.json", "w") as f:
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        features_path = os.path.join(temp_dir, "features.json")
+        with open(features_path, "w") as f:
             json.dump(features, f)
-        mlflow.log_artifact("/tmp/features.json")
+        mlflow.log_artifact(features_path)
 
         run_id = run.info.run_id
         print(f"    RF metrics: {metrics}")
@@ -323,43 +375,255 @@ def train_random_forest(X_train, X_test, y_train, y_test, cv, X_all, features):
 
 
 # ─────────────────────────────────────────
-# 5. MAIN PIPELINE
+# 5. TIME SERIES FORECASTING
+# ─────────────────────────────────────────
+def train_time_series_forecasting(df: pd.DataFrame):
+    print("[5/6] Training Time Series Forecasting Models...")
+    
+    try:
+        from statsmodels.tsa.statespace.sarimax import SARIMAX
+        from statsmodels.tsa.stattools import adfuller
+        from prophet import Prophet
+        import itertools
+        import tempfile
+    except ImportError as e:
+        print(f"    ⚠️  Skipping forecasting (missing dependency: {e}). Continue with classification only.")
+        return None, None, None
+    
+    with mlflow.start_run(run_name="time-series-forecasting"):
+        mlflow.set_tag("model_type", "TimeSeries")
+        mlflow.set_tag("phase", "forecasting")
+
+        # 1. BUILD MONTHLY TIME SERIES
+        # Clean data: ensure Date_In is valid and drop NaT
+        df_ts = df.dropna(subset=['Date_In', 'Quantite']).copy()
+        ts_raw = df_ts.groupby('Date_In')['Quantite'].sum().sort_index()
+        ts_monthly = ts_raw.resample('MS').sum()
+        ts_monthly = ts_monthly.asfreq('MS', fill_value=0)
+
+        print(f"    Time series length: {len(ts_monthly)} months")
+        print(f"    Date range: {ts_monthly.index.min()} → {ts_monthly.index.max()}")
+
+        # Skip if insufficient data
+        if len(ts_monthly) < 12:
+            print(f"    ⚠️  Insufficient data ({len(ts_monthly)} points < 12 required). Skipping forecasting.")
+            return None, None, None
+
+        # 2. STATIONARITY CHECK
+        adf_result = adfuller(ts_monthly.dropna())
+        is_stationary = adf_result[1] < 0.05
+        print(f"    ADF test: p={adf_result[1]:.4f} → {'STATIONARY' if is_stationary else 'NON-STATIONARY'}")
+
+        # 3. TRAIN-TEST SPLIT (time-aware)
+        n_test = min(6, len(ts_monthly) // 4)  # Hold out last 6 months or 1/4 of data
+        train = ts_monthly.iloc[:-n_test]
+        test = ts_monthly.iloc[-n_test:]
+
+        print(f"    Train: {len(train)} months | Test: {len(test)} months")
+
+        # 4. SARIMA GRID SEARCH
+        print("    Searching SARIMA parameters...")
+        best_aic = np.inf
+        best_order = (1, 0, 1)
+        
+        for p, d, q in itertools.product(range(0, 3), range(0, 2), range(0, 3)):
+            try:
+                model = SARIMAX(train, order=(p, d, q), seasonal_order=(1, 1, 1, 12),
+                               enforce_stationarity=False, enforce_invertibility=False)
+                result = model.fit(disp=False)
+                if result.aic < best_aic:
+                    best_aic = result.aic
+                    best_order = (p, d, q)
+            except:
+                continue
+
+        print(f"    Best SARIMA order: {best_order}")
+        
+        sarima_model = SARIMAX(train, order=best_order, seasonal_order=(1, 1, 1, 12),
+                              enforce_stationarity=False, enforce_invertibility=False)
+        sarima_result = sarima_model.fit(disp=False)
+        sarima_forecast = sarima_result.forecast(steps=n_test)
+        sarima_forecast.index = test.index
+
+        # 5. PROPHET
+        print("    Training Prophet model...")
+        prophet_train = pd.DataFrame({'ds': train.index, 'y': train.values})
+        prophet_model = Prophet(yearly_seasonality=True, weekly_seasonality=False, 
+                               daily_seasonality=False, interval_width=0.95)
+        prophet_model.fit(prophet_train)
+        
+        future = prophet_model.make_future_dataframe(periods=n_test, freq='MS')
+        prophet_forecast_full = prophet_model.predict(future)
+        prophet_forecast = prophet_forecast_full.set_index('ds')['yhat'].iloc[-n_test:]
+        prophet_forecast.index = test.index
+
+        # 6. EVALUATION
+        from sklearn.metrics import mean_squared_error, mean_absolute_error
+        
+        sarima_rmse = np.sqrt(mean_squared_error(test.values, sarima_forecast.values))
+        sarima_mae = mean_absolute_error(test.values, sarima_forecast.values)
+        prophet_rmse = np.sqrt(mean_squared_error(test.values, prophet_forecast.values))
+        prophet_mae = mean_absolute_error(test.values, prophet_forecast.values)
+
+        metrics_ts = {
+            "sarima_rmse": round(sarima_rmse, 2),
+            "sarima_mae": round(sarima_mae, 2),
+            "prophet_rmse": round(prophet_rmse, 2),
+            "prophet_mae": round(prophet_mae, 2),
+            "train_points": len(train),
+            "test_points": len(test),
+            "is_stationary": is_stationary
+        }
+
+        mlflow.log_params({"sarima_order": str(best_order), "prophet_seasonality": "yearly"})
+        mlflow.log_metrics(metrics_ts)
+
+        # 7. SAVE MODELS
+        joblib.dump(sarima_result, f"{MODEL_DIR}/sarima_model.pkl")
+        joblib.dump(prophet_model, f"{MODEL_DIR}/prophet_model.pkl")
+        joblib.dump({'train': train, 'test': test}, f"{MODEL_DIR}/ts_data.pkl")
+
+        # 8. VISUALIZE
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+        
+        axes[0].plot(train.index, train.values, label='Train', linewidth=1.5, color='steelblue')
+        axes[0].plot(test.index, test.values, label='Actual', linewidth=2, marker='o', color='black')
+        axes[0].plot(sarima_forecast.index, sarima_forecast.values, label='SARIMA', 
+                    linewidth=2, linestyle='--', marker='s', color='tomato')
+        axes[0].set_title('SARIMA Forecast')
+        axes[0].legend()
+        axes[0].grid(alpha=0.3)
+
+        axes[1].plot(train.index, train.values, label='Train', linewidth=1.5, color='steelblue')
+        axes[1].plot(test.index, test.values, label='Actual', linewidth=2, marker='o', color='black')
+        axes[1].plot(prophet_forecast.index, prophet_forecast.values, label='Prophet',
+                    linewidth=2, linestyle='--', marker='s', color='darkorange')
+        axes[1].set_title('Prophet Forecast')
+        axes[1].legend()
+        axes[1].grid(alpha=0.3)
+
+        plt.tight_layout()
+        
+        temp_plot_path = os.path.join(tempfile.gettempdir(), "ts_forecast.png")
+        plt.savefig(temp_plot_path, dpi=120)
+        plt.close()
+        mlflow.log_artifact(temp_plot_path, artifact_path="plots")
+
+        print(f"    ✅ Forecasting metrics: SARIMA RMSE={metrics_ts['sarima_rmse']}, Prophet RMSE={metrics_ts['prophet_rmse']}")
+        
+        return sarima_result, prophet_model, metrics_ts
+
+
+# ─────────────────────────────────────────
+# 5b. TRAIN — PROFITABILITY REGRESSOR
+# ─────────────────────────────────────────
+def train_profitability_regressor(X_train, X_test, y_train_reg, y_test_reg, features):
+    print("[5b/6] Training Profitability Regressor (Run 3)...")
+    with mlflow.start_run(run_name="profitability-regressor") as run:
+        mlflow.set_tag("model_type", "RandomForestRegressor")
+        mlflow.set_tag("phase", "regression")
+
+        # Regressor for quantity
+        model = RandomForestRegressor(random_state=42, n_jobs=-1)
+        params = {
+            'n_estimators': [100, 200],
+            'max_depth': [None, 10, 20],
+            'min_samples_split': [2, 5]
+        }
+        grid = GridSearchCV(model, params, cv=5, scoring='neg_mean_absolute_error', n_jobs=-1)
+        grid.fit(X_train, y_train_reg)
+
+        y_pred = grid.predict(X_test)
+
+        metrics = {
+            "mae":  round(mean_absolute_error(y_test_reg, y_pred), 4),
+            "rmse": round(np.sqrt(mean_squared_error(y_test_reg, y_pred)), 4),
+            "r2":   round(r2_score(y_test_reg, y_pred), 4),
+        }
+
+        mlflow.log_params(grid.best_params_)
+        mlflow.log_metrics(metrics)
+
+        # Log model
+        signature = infer_signature(X_test, y_pred)
+        mlflow.sklearn.log_model(
+            grid, "model",
+            signature=signature,
+            registered_model_name="profitability-regressor"
+        )
+
+        # Save model locally for API
+        joblib.dump(grid, f"{MODEL_DIR}/profit_model.pkl")
+
+        print(f"    Regressor metrics: {metrics}")
+        return grid, metrics
+
+
+# ─────────────────────────────────────────
+# 6. MAIN PIPELINE
 # ─────────────────────────────────────────
 def main():
- try:
-    print("\n" + "="*60)
-    print("  MLOps Training Pipeline — Stock Classification")
-    print("="*60 + "\n")
+    try:
+        print("\n" + "="*60)
+        print("  MLOps Training Pipeline — Stock Classification + Forecasting")
+        print("="*60 + "\n")
 
-    # Load & preprocess
-    df = load_data(DB_URL)
-    X, y, features, encoders = preprocess(df)
+        # Load & preprocess
+        df = load_data(DB_URL)
+        X, y, features, encoders = preprocess(df)
 
-    # Split
-    print("[5/6] Splitting data...")
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    print(f"    Train: {len(X_train)} | Test: {len(X_test)}")
+        # Split for classification (y is Stock_Level)
+        print("[5/6] Splitting data...")
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        # Regression target (y_reg is Quantite)
+        y_reg = df.loc[X.index, 'Quantite'].copy()
+        y_train_reg = y_reg.loc[X_train.index]
+        y_test_reg = y_reg.loc[X_test.index]
+        
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        print(f"    Train: {len(X_train)} | Test: {len(X_test)}")
 
-    # Train both models (2 MLflow runs)
-    lr_model,  lr_metrics              = train_logistic_regression(X_train, X_test, y_train, y_test, cv)
-    rf_model,  rf_metrics, run_id      = train_random_forest(X_train, X_test, y_train, y_test, cv, X, features)
+        # Train classification models
+        lr_model,  lr_metrics              = train_logistic_regression(X_train, X_test, y_train, y_test, cv)
+        rf_model,  rf_metrics, run_id      = train_random_forest(X_train, X_test, y_train, y_test, cv, X, features)
 
-    # Compare
-    print("\n[6/6] Final comparison:")
-    print(f"    {'Metric':<12} {'LR':>8} {'RF':>8}")
-    print(f"    {'-'*30}")
-    for key in lr_metrics:
-        print(f"    {key:<12} {lr_metrics[key]:>8} {rf_metrics[key]:>8}")
+        # Train profitability regressor
+        pr_model, pr_metrics = train_profitability_regressor(X_train, X_test, y_train_reg, y_test_reg, features)
 
-    print(f"\n✅ Training complete!")
-    print(f"   Model saved to: {MODEL_DIR}/rf_model.pkl")
-    print(f"   MLflow run ID:  {run_id}")
-    print(f"   View UI at:     {MLFLOW_URI}")
+        # Save encoders for consistent inference
+        joblib.dump(encoders, f"{MODEL_DIR}/encoders.pkl")
+        print(f"    ✅ Encoders saved to {MODEL_DIR}/encoders.pkl")
 
- except Exception as e:
+        # Train time series forecasting
+        sarima_model, prophet_model, ts_metrics = train_time_series_forecasting(df)
+
+        # Comparison summary
+        print("\n[6/6] Classification Model Comparison:")
+        print(f"    {'Metric':<12} {'LR':>8} {'RF':>8}")
+        print(f"    {'-'*30}")
+        for key in lr_metrics:
+            print(f"    {key:<12} {lr_metrics[key]:>8} {rf_metrics[key]:>8}")
+
+        print("\n[6/6] Profitability Regression Metrics:")
+        for key, value in pr_metrics.items():
+            print(f"    {key:<12} {value:>8}")
+
+        if ts_metrics:
+            print("\n[6/6] Time Series Forecasting Metrics:")
+            for key, value in ts_metrics.items():
+                print(f"    {key:<20} {value}")
+
+        print(f"\n✅ Training complete!")
+        print(f"   Classification model saved to: {MODEL_DIR}/rf_model.pkl")
+        print(f"   Regression model saved to:     {MODEL_DIR}/profit_model.pkl")
+        print(f"   Forecasting models saved to: {MODEL_DIR}/sarima_model.pkl, {MODEL_DIR}/prophet_model.pkl")
+        print(f"   MLflow run ID:  {run_id}")
+        print(f"   View UI at:     {MLFLOW_URI}")
+
+    except Exception as e:
         print(f"\n❌ ERROR: {e}")
         import traceback
         traceback.print_exc()
